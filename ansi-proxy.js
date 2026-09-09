@@ -13,9 +13,15 @@ function splitTail(s) {
   return m ? [s.slice(0, m.index), s.slice(m.index)] : [s, ''];
 }
 
+const DOCUMENTED = /(?:\\(?:033|0x1[bB]|e|x1[bB]|u001[bB])|0x1[bB]|\\)$/;
+
 function reinject(s) {
   if (typeof s !== 'string' || s.indexOf('[') === -1) return s;
-  return s.replace(CSI, (m, p) => (s.indexOf(ESC + m) !== -1 ? m : ESC + '[' + p + 'm'));
+  return s.replace(CSI, (m, p, off) => {
+    if (s.charCodeAt(off - 1) === 27) return m;
+    if (DOCUMENTED.test(s.slice(Math.max(0, off - 8), off))) return m;
+    return ESC + '[' + p + 'm';
+  });
 }
 
 function rewriteEvent(line, emit) {
