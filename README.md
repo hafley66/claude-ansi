@@ -4,6 +4,8 @@ ANSI color for Claude Code. Escape codes written by the model render as color in
 
 Installs alongside your existing setup as a separate `claude-color` command. Your `claude` command is not touched.
 
+![claude-color rendering the full ANSI palette](docs/demo.png)
+
 ## TOC
 
 1. [Two problems and two fixes](#two-problems-and-two-fixes)
