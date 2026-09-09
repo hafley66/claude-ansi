@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# claude-ansi: ANSI-unlock patch for Claude Code; usage: bash claude-ansi.sh [version] [--no-verify]
+# claude-ansi: ANSI unlock for Claude Code; usage: bash claude-ansi.sh [version] [--no-verify] [--replace-claude]
 set -euo pipefail
 
 NO_VERIFY=0
+REPLACE_CLAUDE=0
 VER_ARG=""
 for a in "$@"; do
   case "$a" in
     --no-verify) NO_VERIFY=1 ;;
+    --replace-claude) REPLACE_CLAUDE=1 ;;
     -h|--help) sed -n '2,4p' "$0"; exit 0 ;;
     *) VER_ARG="$a" ;;
   esac
@@ -40,8 +42,8 @@ fi
 if [ "$SRC" != "$STOCK" ]; then
   cp -f "$SRC" "$STOCK"
 fi
-if [ -e "$BIN_DIR/claude" ] && [ ! -L "$BIN_DIR/claude" ]; then
-  echo "$BIN_DIR/claude is a regular file (npm/homebrew install?); refusing to clobber"
+if [ -e "$BIN_DIR/claude" ] && [ ! -L "$BIN_DIR/claude" ] && ! head -3 "$BIN_DIR/claude" 2>/dev/null | grep -q 'claude-ansi\|__REAL_BINARY__\|CLAUDE_ANSI_NO_PROXY'; then
+  echo "$BIN_DIR/claude is a regular file not written by this script; refusing to clobber"
   exit 6
 fi
 
@@ -171,8 +173,29 @@ fi
 
 mv -f "$TMP" "$DST"
 trap - EXIT
-ln -sf "$DST" "$BIN_DIR/claude"
+
+if [ "$OS" = Darwin ]; then
+  codesign -v "$DST" 2>/dev/null || codesign --force --sign - "$DST" >/dev/null 2>&1
+  codesign -v "$DST" || { echo "ABORT: $DST is unsigned; macOS will hang on it"; exit 7; }
+fi
+"$DST" --version >/dev/null || { echo "ABORT: $DST will not run after install"; exit 7; }
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$HERE/claude-wrapper.sh" ] && [ -f "$HERE/ansi-proxy.js" ]; then
+  WRAP_TMP="$(mktemp "$BIN_DIR/.claude-color.XXXXXX")"
+  sed -e "s|__REAL_BINARY__|$DST|" -e "s|__PROXY_JS__|$HERE/ansi-proxy.js|" \
+    "$HERE/claude-wrapper.sh" > "$WRAP_TMP"
+  chmod +x "$WRAP_TMP"
+  rm -f "$BIN_DIR/claude-color"
+  mv -f "$WRAP_TMP" "$BIN_DIR/claude-color"
+  echo "claude-color installed (proxy re-injects ANSI; honors an existing ANTHROPIC_BASE_URL)"
+fi
 ln -sf "$STOCK" "$BIN_DIR/claude-stock"
-echo "claude -> $DST"
+if [ "$REPLACE_CLAUDE" -eq 1 ]; then
+  rm -f "$BIN_DIR/claude"
+  ln -sf "$DST" "$BIN_DIR/claude"
+  echo "claude -> $DST"
+else
+  echo "claude untouched; run claude-color to try it (--replace-claude makes it the default)"
+fi
 echo "claude-stock -> $STOCK (rollback: ln -sf \"\$HOME/.local/share/claude/versions/$SRC_VER.stock\" \"\$HOME/.local/bin/claude\")"
 "$DST" --version && echo OK
