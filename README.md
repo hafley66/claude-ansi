@@ -93,7 +93,22 @@ pkill -f ansi-proxy.js
 Add this line only if you used `--replace-claude`:
 
 ```bash
-ln -sf "$(readlink ~/.local/bin/claude-stock)" ~/.local/bin/claude
+ln -sfn "$(readlink ~/.local/bin/claude-stock)" ~/.local/bin/claude
+```
+
+### If a binary dies with `Killed: 9`
+
+macOS caches code-signature state per inode. Overwriting an executable's bytes
+in place leaves that cache stale and every later exec of the file is SIGKILLed,
+even when the bytes are byte-identical to a working copy. Installer versions
+before this fix used `cp -f` onto an existing `<version>.stock`. Rebuild the
+file as a new inode:
+
+```bash
+V="$(readlink ~/.local/bin/claude-stock)"; V="${V%.stock}"   # e.g. .../versions/2.1.266
+rm -f "$V.stock"
+cp -f "$V" "$V.stock.tmp" && chmod 755 "$V.stock.tmp" && mv -f "$V.stock.tmp" "$V.stock"
+ln -sfn "$V" ~/.local/bin/claude
 ```
 
 ## After a Claude Code update

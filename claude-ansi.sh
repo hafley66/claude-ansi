@@ -34,13 +34,25 @@ fi
 SRC="$SHARE/$SRC_VER"
 STOCK="$SHARE/$SRC_VER.stock"
 DST="$SHARE/$SRC_VER-ansi"
+
+# Never cp over an existing executable. macOS caches the code-signature state
+# per inode; overwriting the bytes in place leaves the cache stale and every
+# later exec of that file dies with SIGKILL. Write a fresh inode and rename.
+safe_cp() {
+  local src="$1" dst="$2" tmp
+  tmp="$(mktemp "$dst.tmp.XXXXXX")" || return 1
+  cp -f "$src" "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 755 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$dst"
+}
+
 if [ ! -f "$SRC" ] && [ -f "$STOCK" ]; then
   echo "version pruned by claude; restoring from $STOCK"
-  cp -f "$STOCK" "$SRC"
+  safe_cp "$STOCK" "$SRC"
 fi
 [ -f "$SRC" ] || { echo "no such version: $SRC"; exit 1; }
 if [ "$SRC" != "$STOCK" ]; then
-  cp -f "$SRC" "$STOCK"
+  safe_cp "$SRC" "$STOCK"
 fi
 if [ -e "$BIN_DIR/claude" ] && [ ! -L "$BIN_DIR/claude" ] && ! head -3 "$BIN_DIR/claude" 2>/dev/null | grep -q 'claude-ansi\|__REAL_BINARY__\|CLAUDE_ANSI_NO_PROXY'; then
   echo "$BIN_DIR/claude is a regular file not written by this script; refusing to clobber"
@@ -98,7 +110,7 @@ if [ "$OS" = Darwin ]; then
   codesign --force --sign - "$TMP" >/dev/null 2>&1
   codesign -v "$TMP" && echo 'codesign: valid'
 fi
-chmod +x "$TMP"
+chmod 755 "$TMP"
 "$TMP" --version >/dev/null || { echo 'ABORT: patched binary will not run'; exit 4; }
 
 if [ "$NO_VERIFY" -eq 0 ]; then
@@ -184,15 +196,15 @@ if [ -f "$HERE/claude-wrapper.sh" ] && [ -f "$HERE/ansi-proxy.js" ]; then
   WRAP_TMP="$(mktemp "$BIN_DIR/.claude-color.XXXXXX")"
   sed -e "s|__REAL_BINARY__|$DST|" -e "s|__PROXY_JS__|$HERE/ansi-proxy.js|" \
     "$HERE/claude-wrapper.sh" > "$WRAP_TMP"
-  chmod +x "$WRAP_TMP"
+  chmod 755 "$WRAP_TMP"
   rm -f "$BIN_DIR/claude-color"
   mv -f "$WRAP_TMP" "$BIN_DIR/claude-color"
   echo "claude-color installed (proxy re-injects ANSI; honors an existing ANTHROPIC_BASE_URL)"
 fi
-ln -sf "$STOCK" "$BIN_DIR/claude-stock"
+ln -sfn "$STOCK" "$BIN_DIR/claude-stock"
 if [ "$REPLACE_CLAUDE" -eq 1 ]; then
   rm -f "$BIN_DIR/claude"
-  ln -sf "$DST" "$BIN_DIR/claude"
+  ln -sfn "$DST" "$BIN_DIR/claude"
   echo "claude -> $DST"
 else
   echo "claude untouched; run claude-color to try it (--replace-claude makes it the default)"
