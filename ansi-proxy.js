@@ -13,7 +13,7 @@ function splitTail(s) {
   return m ? [s.slice(0, m.index), s.slice(m.index)] : [s, ''];
 }
 
-const DOCUMENTED = /(?:\\(?:033|0x1[bB]|e|x1[bB]|u001[bB])|0x1[bB]|\\)$/;
+const DOCUMENTED = /(?:\\(?:033|e|x1[bB]|u001[bB])|0x1[bB]|ESC|CSI|\^\[?|\\)$/;
 
 function reinject(s) {
   if (typeof s !== 'string' || s.indexOf('[') === -1) return s;
