@@ -7,6 +7,7 @@ const ESC = String.fromCharCode(27);
 const CSI = /\[((?:\d{1,3};){0,5}\d{1,3})m/g;
 const PARTIAL = /\[(?:\d{1,3};){0,5}\d{0,3}$/;
 const pend = new Map();
+const ctx = new Map();
 
 function splitTail(s) {
   const m = PARTIAL.exec(s);
@@ -15,11 +16,14 @@ function splitTail(s) {
 
 const DOCUMENTED = /(?:\\(?:033|e|x1[bB]|u001[bB])|0x1[bB]|ESC|CSI|\^\[?|\\)$/;
 
-function reinject(s) {
+function reinject(s, prior) {
   if (typeof s !== 'string' || s.indexOf('[') === -1) return s;
+  const pre = prior || '';
   return s.replace(CSI, (m, p, off) => {
-    if (s.charCodeAt(off - 1) === 27) return m;
-    if (DOCUMENTED.test(s.slice(Math.max(0, off - 8), off))) return m;
+    if (off > 0 && s.charCodeAt(off - 1) === 27) return m;
+    if (off === 0 && pre.charCodeAt(pre.length - 1) === 27) return m;
+    const look = (pre + s.slice(0, off)).slice(-8);
+    if (DOCUMENTED.test(look)) return m;
     return ESC + '[' + p + 'm';
   });
 }
@@ -38,7 +42,8 @@ function rewriteEvent(line, emit) {
     if (parts[1]) pend.set(idx, parts[1]); else pend.delete(idx);
     if (!parts[0]) return;
 
-    d.text = reinject(parts[0]);
+    d.text = reinject(parts[0], ctx.get(idx));
+    ctx.set(idx, ((ctx.get(idx) || '') + parts[0]).slice(-8));
     emit('data: ' + JSON.stringify(o));
     return;
   }
