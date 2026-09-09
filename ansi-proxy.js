@@ -40,7 +40,7 @@ function rewriteEvent(line, emit) {
     const joined = (pend.get(idx) || '') + d.text;
     const parts = splitTail(joined);
     if (parts[1]) pend.set(idx, parts[1]); else pend.delete(idx);
-    if (!parts[0]) return;
+    if (!parts[0]) { d.text = ''; emit('data: ' + JSON.stringify(o)); return; }
 
     d.text = reinject(parts[0], ctx.get(idx));
     ctx.set(idx, ((ctx.get(idx) || '') + parts[0]).slice(-8));
@@ -64,6 +64,9 @@ const server = http.createServer((req, res) => {
       const ct = ur.headers['content-type'] || '';
       const oh = { ...ur.headers };
       delete oh['content-length'];
+      delete oh['transfer-encoding'];
+      delete oh['connection'];
+      delete oh['keep-alive'];
       res.writeHead(ur.statusCode, oh);
       if (!ct.includes('text/event-stream')) {
         if (!ct.includes('application/json')) { ur.pipe(res); return; }
@@ -87,7 +90,7 @@ const server = http.createServer((req, res) => {
           } catch (e) {}
           res.end(out);
         });
-        ur.on('error', () => res.end());
+        ur.on('error', () => res.destroy());
         return;
       }
       let buf = '';
@@ -102,7 +105,7 @@ const server = http.createServer((req, res) => {
         }
       });
       ur.on('end', () => { if (buf) rewriteEvent(buf, (l) => res.write(l)); res.end(); });
-      ur.on('error', () => res.end());
+      ur.on('error', () => res.destroy());
     }
   );
   up.on('error', (e) => { res.writeHead(502); res.end(String(e)); });
