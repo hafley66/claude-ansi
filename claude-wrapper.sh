@@ -77,12 +77,21 @@ repatch() {
   return 0
 }
 
+# A bare TCP connect proves only that something is listening. An unrelated
+# server on the same port would be accepted and Claude Code pointed at it, so
+# ask for the health token and match it before trusting the port.
 alive() {
   local p="${1:-}"
   [ -n "$p" ] || return 1
-  (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null || return 1
+  exec 3<>"/dev/tcp/127.0.0.1/$p" 2>/dev/null || return 1
+  printf 'GET /__claude_ansi_health HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' >&3 2>/dev/null
+  local line rc=1
+  while IFS= read -r -t 3 line <&3; do
+    case "$line" in *claude-ansi-proxy*) rc=0; break ;; esac
+  done
   exec 3>&- 2>/dev/null
-  return 0
+  exec 3<&- 2>/dev/null
+  return $rc
 }
 
 start_proxy() {

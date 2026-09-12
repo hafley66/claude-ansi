@@ -55,7 +55,18 @@ function rewriteEvent(line, emit) {
   emit(line);
 }
 
+// Reachability is not identity. Anything else listening on the chosen port
+// answers a bare TCP connect, and the wrapper would then point Claude Code at
+// a stranger. The wrapper probes this path and matches the token.
+const HEALTH_PATH = '/__claude_ansi_health';
+const HEALTH_TOKEN = 'claude-ansi-proxy';
+
 const server = http.createServer((req, res) => {
+  if (req.url === HEALTH_PATH) {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end(HEALTH_TOKEN + '\n');
+    return;
+  }
   const headers = { ...req.headers, host: UPSTREAM };
   delete headers['accept-encoding'];
   const up = https.request(
@@ -117,8 +128,13 @@ const os = require('os');
 const path = require('path');
 const CACHE = path.join(os.homedir(), '.cache', 'claude-ansi');
 
+// ANSI_PROXY_PORT is a preference, not a pin: an unrelated server already on
+// it must not stop the proxy from starting. The wrapper reads the real port
+// back out of the port file. ANSI_PROXY_PORT_STRICT=1 makes the port a hard
+// requirement and turns a conflict back into an exit.
 server.on('error', (e) => {
-  if (e.code === 'EADDRINUSE' && !process.env.ANSI_PROXY_PORT) {
+  if (e.code === 'EADDRINUSE' && process.env.ANSI_PROXY_PORT_STRICT !== '1') {
+    console.error('port ' + PORT + ' taken; falling back to an ephemeral port');
     server.listen(0, '127.0.0.1');
     return;
   }

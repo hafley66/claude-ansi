@@ -209,18 +209,35 @@ fi
 "$DST" --version >/dev/null || { echo "ABORT: $DST will not run after install"; exit 7; }
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# The wrapper repatches itself by re-running this script, so it needs a copy
+# that outlives the clone. Vendor the three files the wrapper depends on and
+# point it at those, leaving the clone free to be moved or deleted.
+VENDOR="$ANSI_DIR/lib"
+vendor_sources() {
+  [ "$HERE" = "$VENDOR" ] && return 0
+  mkdir -p "$VENDOR" || return 1
+  local f
+  for f in claude-ansi.sh claude-wrapper.sh ansi-proxy.js; do
+    [ -f "$HERE/$f" ] || return 1
+    cp -f "$HERE/$f" "$VENDOR/$f.tmp" || return 1
+    mv -f "$VENDOR/$f.tmp" "$VENDOR/$f" || return 1
+  done
+  chmod 755 "$VENDOR/claude-ansi.sh"
+}
+
 # Write the wrapper to a fresh inode and rename, so a wrapper currently
 # executing this repatch keeps reading the file it was launched from.
 install_wrapper() {
   local dest="$1" tmp
   tmp="$(mktemp "$(dirname "$dest")/.claude-ansi.XXXXXX")" || return 1
-  sed -e "s|__INSTALLER__|$HERE/claude-ansi.sh|" -e "s|__PROXY_JS__|$HERE/ansi-proxy.js|" \
+  sed -e "s|__INSTALLER__|$VENDOR/claude-ansi.sh|" -e "s|__PROXY_JS__|$VENDOR/ansi-proxy.js|" \
     "$HERE/claude-wrapper.sh" > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 755 "$tmp"
   mv -f "$tmp" "$dest"
 }
 
 if [ "$NO_WRAPPER" -eq 0 ] && [ -f "$HERE/claude-wrapper.sh" ] && [ -f "$HERE/ansi-proxy.js" ]; then
+  vendor_sources && echo "sources vendored to $VENDOR"
   install_wrapper "$BIN_DIR/claude-color" \
     && echo "claude-color installed (proxy re-injects ANSI; honors an existing ANTHROPIC_BASE_URL)"
   if [ "$REPLACE_CLAUDE" -eq 1 ]; then

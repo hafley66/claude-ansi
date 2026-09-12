@@ -179,6 +179,8 @@ Step 1 must still emit a `data:` line. An SSE `event:` line with no `data:` line
 
 The escape byte goes on the wire as the six-character JSON escape `\u001b` because a raw 0x1B inside a JSON string is illegal under RFC 8259. Non-streamed JSON responses get the same rewrite on `content[].text`.
 
-The proxy writes its port to `~/.cache/claude-ansi/port` and picks another port if the default is taken. One instance serves every session.
+The proxy writes its port to `~/.cache/claude-ansi/port` and falls back to an ephemeral port if the default is taken. Set `ANSI_PROXY_PORT_STRICT=1` to make a conflict fatal instead. One instance serves every session.
+
+Before reusing that port the wrapper sends `GET /__claude_ansi_health` and requires the token `claude-ansi-proxy` back. A bare TCP connect proves only that *something* is listening: an unrelated server on the same port answers it, and the wrapper would then set `ANTHROPIC_BASE_URL` to a stranger and every API call would fail. On this machine a `python -m http.server 8791` did exactly that.
 
 Nothing is logged and nothing is stored. Auth material is forwarded and never read.
