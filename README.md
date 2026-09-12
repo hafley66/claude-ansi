@@ -90,7 +90,7 @@ Every gate runs before anything is installed. A failure exits nonzero and leaves
 | all 5 patterns matched at least one site | 3 | renamed minified code in a new release |
 | patched copy runs `--version` | 4 | a corrupt patch |
 | pty render probe renders a red escape sequence | 5 | render-path regressions end to end |
-| `~/.local/bin/claude` is not a foreign regular file | 6 | npm or Homebrew installs |
+| `~/.local/bin-ansi/claude` is absent or was written by this script | 6 | clobbering a file you put there |
 | binary at its final path is signed and runs | 7 | an interrupted install leaving a broken file |
 
 Pass `--no-verify` to skip the render probe. The probe writes a UUID-named two-message session into the `~/.claude/projects/` entry for your current directory. It resumes that session headless in a pty and checks the escape bytes arrived and then deletes the file. Run it from a directory Claude Code already trusts. An untrusted directory downgrades the probe to SKIP.
@@ -132,7 +132,7 @@ Nothing. The wrapper repatches itself.
 
 Every launch compares the newest version under `~/.local/share/claude/versions/` against the patched builds in `~/.local/share/claude-ansi/`. A new version triggers one repatch, about 4 seconds, then the launch continues. Concurrent launches serialize on a lock directory instead of racing a 200MB copy. `CLAUDE_ANSI_NO_PATCH=1` turns the self-heal off.
 
-If the patch fails the wrapper still launches, falling back to the newest patched build it has, then to the stock binary with a warning on stderr.
+If the patch fails the wrapper still launches, falling back to the newest patched build it has, then to the stock binary with a warning on stderr. That failure is stamped at `~/.cache/claude-ansi/failed-<version>` so a release this repo cannot patch costs one attempt rather than one per launch. Pulling a newer `claude-ansi.sh` clears the stamp; so does the next release.
 
 The patcher matches byte patterns rather than offsets so it usually survives a release untouched. A `0 sites` abort means the minified code was renamed and this repo needs an update.
 

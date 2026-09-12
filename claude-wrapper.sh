@@ -40,9 +40,20 @@ clear_stale_lock() {
 
 repatch() {
   local ver="$1"
-  [ -f "$INSTALLER" ] || return 1
+  if [ ! -f "$INSTALLER" ]; then
+    echo "claude-ansi: installer missing at $INSTALLER; cannot patch $ver" >&2
+    return 1
+  fi
   command -v python3 >/dev/null 2>&1 || return 1
   mkdir -p "$CACHE"
+  # A release that renames the minified code fails every pattern and cannot be
+  # fixed by retrying. Without this stamp that failure costs a 200MB copy on
+  # every single launch. The stamp is per version, so the next release retries.
+  local stamp="$CACHE/failed-$ver"
+  if [ -f "$stamp" ]; then
+    [ "$INSTALLER" -nt "$stamp" ] || return 1
+    rm -f "$stamp"
+  fi
   clear_stale_lock
   if mkdir "$LOCK" 2>/dev/null; then
     trap 'rmdir "$LOCK" 2>/dev/null' EXIT
@@ -51,6 +62,10 @@ repatch() {
     local rc=$?
     rmdir "$LOCK" 2>/dev/null
     trap - EXIT
+    if [ "$rc" -ne 0 ]; then
+      : > "$stamp"
+      echo "claude-ansi: patch of $ver failed (rc=$rc); not retrying until $INSTALLER changes" >&2
+    fi
     return $rc
   fi
   # Another launch is mid-patch. Wait it out rather than racing a 200MB copy.
