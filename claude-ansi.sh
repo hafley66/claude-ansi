@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# claude-ansi: ANSI unlock for Claude Code; usage: bash claude-ansi.sh [version] [--no-verify] [--replace-claude]
+# claude-ansi: ANSI unlock for Claude Code; usage: bash claude-ansi.sh [version] [--no-verify] [--no-wrapper] [--replace-claude]
 set -euo pipefail
 
 NO_VERIFY=0
 REPLACE_CLAUDE=0
+NO_WRAPPER=0
 VER_ARG=""
 for a in "$@"; do
   case "$a" in
     --no-verify) NO_VERIFY=1 ;;
+    --no-wrapper) NO_WRAPPER=1 ;;
     --replace-claude) REPLACE_CLAUDE=1 ;;
     -h|--help) sed -n '2,4p' "$0"; exit 0 ;;
     *) VER_ARG="$a" ;;
@@ -22,18 +24,32 @@ esac
 
 SHARE="$HOME/.local/share/claude/versions"
 BIN_DIR="$HOME/.local/bin"
+# Claude Code prunes every file under $SHARE that is not a version it still
+# points at, which took the patched binary and its snapshot with it. Both now
+# live outside the tree the pruner walks.
+ANSI_DIR="$HOME/.local/share/claude-ansi"
+# The updater rewrites $BIN_DIR/claude on every release, so the `claude` that
+# boop and ccz resolve through PATH is a shadow this script owns instead.
+SHADOW_DIR="$HOME/.local/bin-ansi"
 SHAREExists() { [ -d "$SHARE" ] || { echo "no versions dir: $SHARE (native install required)"; exit 1; }; }
 SHAREExists
+mkdir -p "$ANSI_DIR"
 
 if [ -n "$VER_ARG" ]; then
   SRC_VER="$VER_ARG"
 else
   SRC_VER="$(ls "$SHARE" | grep -E '^[0-9]+(\.[0-9]+)*$' | sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n | tail -1 || true)"
-  [ -n "$SRC_VER" ] || SRC_VER="$(ls "$SHARE" | grep -E '\.stock$' | sed 's/\.stock$//' | sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n | tail -1 || true)"
+  [ -n "$SRC_VER" ] || SRC_VER="$(ls "$ANSI_DIR" | grep -E '\.stock$' | sed 's/\.stock$//' | sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n | tail -1 || true)"
 fi
 SRC="$SHARE/$SRC_VER"
-STOCK="$SHARE/$SRC_VER.stock"
-DST="$SHARE/$SRC_VER-ansi"
+STOCK="$ANSI_DIR/$SRC_VER.stock"
+DST="$ANSI_DIR/$SRC_VER-ansi"
+
+# Earlier releases kept both files beside the versions the pruner deletes.
+for legacy in "$SHARE/$SRC_VER.stock:$STOCK" "$SHARE/$SRC_VER-ansi:$DST"; do
+  from="${legacy%%:*}"; to="${legacy##*:}"
+  [ -f "$from" ] && [ ! -f "$to" ] && mv -f "$from" "$to" && echo "moved $from -> $to"
+done
 
 # Never cp over an existing executable. macOS caches the code-signature state
 # per inode; overwriting the bytes in place leaves the cache stale and every
@@ -47,15 +63,15 @@ safe_cp() {
 }
 
 if [ ! -f "$SRC" ] && [ -f "$STOCK" ]; then
-  echo "version pruned by claude; restoring from $STOCK"
-  safe_cp "$STOCK" "$SRC"
+  echo "version $SRC_VER pruned by claude; patching from $STOCK instead"
+  SRC="$STOCK"
 fi
 [ -f "$SRC" ] || { echo "no such version: $SRC"; exit 1; }
 if [ "$SRC" != "$STOCK" ]; then
   safe_cp "$SRC" "$STOCK"
 fi
-if [ -e "$BIN_DIR/claude" ] && [ ! -L "$BIN_DIR/claude" ] && ! head -3 "$BIN_DIR/claude" 2>/dev/null | grep -q 'claude-ansi\|__REAL_BINARY__\|CLAUDE_ANSI_NO_PROXY'; then
-  echo "$BIN_DIR/claude is a regular file not written by this script; refusing to clobber"
+if [ -e "$SHADOW_DIR/claude" ] && ! head -3 "$SHADOW_DIR/claude" 2>/dev/null | grep -q 'claude-ansi\|__REAL_BINARY__\|CLAUDE_ANSI_NO_PROXY'; then
+  echo "$SHADOW_DIR/claude was not written by this script; refusing to clobber"
   exit 6
 fi
 
@@ -192,22 +208,41 @@ if [ "$OS" = Darwin ]; then
 fi
 "$DST" --version >/dev/null || { echo "ABORT: $DST will not run after install"; exit 7; }
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$HERE/claude-wrapper.sh" ] && [ -f "$HERE/ansi-proxy.js" ]; then
-  WRAP_TMP="$(mktemp "$BIN_DIR/.claude-color.XXXXXX")"
-  sed -e "s|__REAL_BINARY__|$DST|" -e "s|__PROXY_JS__|$HERE/ansi-proxy.js|" \
-    "$HERE/claude-wrapper.sh" > "$WRAP_TMP"
-  chmod 755 "$WRAP_TMP"
-  rm -f "$BIN_DIR/claude-color"
-  mv -f "$WRAP_TMP" "$BIN_DIR/claude-color"
-  echo "claude-color installed (proxy re-injects ANSI; honors an existing ANTHROPIC_BASE_URL)"
+
+# Write the wrapper to a fresh inode and rename, so a wrapper currently
+# executing this repatch keeps reading the file it was launched from.
+install_wrapper() {
+  local dest="$1" tmp
+  tmp="$(mktemp "$(dirname "$dest")/.claude-ansi.XXXXXX")" || return 1
+  sed -e "s|__INSTALLER__|$HERE/claude-ansi.sh|" -e "s|__PROXY_JS__|$HERE/ansi-proxy.js|" \
+    "$HERE/claude-wrapper.sh" > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 755 "$tmp"
+  mv -f "$tmp" "$dest"
+}
+
+if [ "$NO_WRAPPER" -eq 0 ] && [ -f "$HERE/claude-wrapper.sh" ] && [ -f "$HERE/ansi-proxy.js" ]; then
+  install_wrapper "$BIN_DIR/claude-color" \
+    && echo "claude-color installed (proxy re-injects ANSI; honors an existing ANTHROPIC_BASE_URL)"
+  if [ "$REPLACE_CLAUDE" -eq 1 ]; then
+    mkdir -p "$SHADOW_DIR"
+    install_wrapper "$SHADOW_DIR/claude" && echo "claude shadow installed at $SHADOW_DIR/claude"
+    case ":$PATH:" in
+      *":$SHADOW_DIR:"*) ;;
+      *) echo "ADD TO YOUR SHELL PROFILE, after every other PATH line:"
+         echo "  export PATH=\"$SHADOW_DIR:\$PATH\"" ;;
+    esac
+  else
+    echo "claude untouched; run claude-color to try it (--replace-claude shadows \`claude\` on PATH)"
+  fi
 fi
 ln -sfn "$STOCK" "$BIN_DIR/claude-stock"
-if [ "$REPLACE_CLAUDE" -eq 1 ]; then
-  rm -f "$BIN_DIR/claude"
-  ln -sfn "$DST" "$BIN_DIR/claude"
-  echo "claude -> $DST"
-else
-  echo "claude untouched; run claude-color to try it (--replace-claude makes it the default)"
-fi
-echo "claude-stock -> $STOCK (rollback: ln -sf \"\$HOME/.local/share/claude/versions/$SRC_VER.stock\" \"\$HOME/.local/bin/claude\")"
+
+# Keep the two newest of each kind; the rest are dead weight at 200MB apiece.
+for kind in '-ansi' '.stock'; do
+  ls "$ANSI_DIR" 2>/dev/null | grep -F -- "$kind" | sed "s|${kind}\$||" \
+    | sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n | head -n -2 \
+    | while read -r old; do rm -f "$ANSI_DIR/$old$kind" && echo "pruned $old$kind"; done
+done
+
+echo "stock snapshot: $STOCK"
 "$DST" --version && echo OK

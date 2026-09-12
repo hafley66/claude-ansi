@@ -43,9 +43,9 @@ Three things get installed:
 
 | name | what it is |
 |---|---|
-| `claude-color` | wrapper that starts the proxy and then runs the patched binary |
-| `claude-stock` | pristine snapshot for rollback |
-| `<version>-ansi` | the patched binary beside the original |
+| `~/.local/bin/claude-color` | wrapper that repatches on a version bump, starts the proxy, then runs the patched binary |
+| `~/.local/share/claude-ansi/<version>-ansi` | the patched binary, outside the directory the updater prunes |
+| `~/.local/share/claude-ansi/<version>.stock` | pristine snapshot for rollback, symlinked as `claude-stock` |
 
 Needs the native install at `~/.local/share/claude/versions/` plus bash and python3. Node is needed for the proxy. macOS needs the codesign tools. Linux works and skips signing.
 
@@ -59,12 +59,25 @@ Ask it to print something in bracket form such as `[31mRED[0m` and it comes out 
 
 ## Make it the default
 
-Two ways. Both are reversible.
+```bash
+bash claude-ansi.sh --replace-claude
+```
+
+That writes the wrapper to `~/.local/bin-ansi/claude` and leaves `~/.local/bin/claude` alone for the updater to own. Put the shadow directory first, after every other `PATH` line in your shell profile:
 
 ```bash
-alias claude=claude-color              # per shell
-bash claude-ansi.sh --replace-claude   # repoints ~/.local/bin/claude
+export PATH="$HOME/.local/bin-ansi:$PATH"
 ```
+
+Anything resolving `claude` through `PATH` now gets color: your shell, a `ccz`-style env wrapper that ends in `exec claude`, an orchestrator that spawns harnesses by name.
+
+tmux panes are spawned by the tmux server, which seeds a new session from the environment of the client that created it. A client started before the profile change has the old `PATH`. For sessions created by anything else, add the same directory to the server's own environment in `~/.tmux.conf`:
+
+```
+run-shell -b "tmux setenv -g PATH \"$HOME/.local/bin-ansi:$PATH\""
+```
+
+A per-shell `alias claude=claude-color` works too, and is reversible by closing the shell. It does not reach a subprocess that spawns `claude` itself.
 
 The wrapper leaves an existing `ANTHROPIC_BASE_URL` alone so a gateway wrapper composes with it and skips the proxy. Set `CLAUDE_ANSI_NO_PROXY=1` to disable the proxy for one run.
 
@@ -85,16 +98,18 @@ Pass `--no-verify` to skip the render probe. The probe writes a UUID-named two-m
 ## Rollback
 
 ```bash
-rm -f ~/.local/bin/claude-color
-rm -f ~/.local/share/claude/versions/*-ansi
+rm -f ~/.local/bin/claude-color ~/.local/bin/claude-stock
+rm -rf ~/.local/share/claude-ansi ~/.cache/claude-ansi
 pkill -f ansi-proxy.js
 ```
 
-Add this line only if you used `--replace-claude`:
+Add this only if you used `--replace-claude`, then drop the `bin-ansi` line from your shell profile and `~/.tmux.conf`:
 
 ```bash
-ln -sfn "$(readlink ~/.local/bin/claude-stock)" ~/.local/bin/claude
+rm -rf ~/.local/bin-ansi
 ```
+
+`~/.local/bin/claude` is never modified, so it already points at the stock binary.
 
 ### If a binary dies with `Killed: 9`
 
@@ -105,19 +120,28 @@ before this fix used `cp -f` onto an existing `<version>.stock`. Rebuild the
 file as a new inode:
 
 ```bash
-V="$(readlink ~/.local/bin/claude-stock)"; V="${V%.stock}"   # e.g. .../versions/2.1.266
-rm -f "$V.stock"
-cp -f "$V" "$V.stock.tmp" && chmod 755 "$V.stock.tmp" && mv -f "$V.stock.tmp" "$V.stock"
-ln -sfn "$V" ~/.local/bin/claude
+S="$(readlink ~/.local/bin/claude-stock)"                    # .../claude-ansi/2.1.269.stock
+V="$HOME/.local/share/claude/versions/$(basename "${S%.stock}")"
+rm -f "$S"
+cp -f "$V" "$S.tmp" && chmod 755 "$S.tmp" && mv -f "$S.tmp" "$S"
 ```
 
 ## After a Claude Code update
 
-`claude update` installs a fresh unpatched binary. Rerun `bash claude-ansi.sh`.
+Nothing. The wrapper repatches itself.
+
+Every launch compares the newest version under `~/.local/share/claude/versions/` against the patched builds in `~/.local/share/claude-ansi/`. A new version triggers one repatch, about 4 seconds, then the launch continues. Concurrent launches serialize on a lock directory instead of racing a 200MB copy. `CLAUDE_ANSI_NO_PATCH=1` turns the self-heal off.
+
+If the patch fails the wrapper still launches, falling back to the newest patched build it has, then to the stock binary with a warning on stderr.
 
 The patcher matches byte patterns rather than offsets so it usually survives a release untouched. A `0 sites` abort means the minified code was renamed and this repo needs an update.
 
-Claude Code also prunes version directories it no longer points at and that can delete the binary the patcher reads. The script keeps a `<version>.stock` snapshot under a name the pruner ignores and restores from it automatically.
+Two things the updater does that this has to work around:
+
+| updater behavior | consequence | handled by |
+|---|---|---|
+| prunes every file under `versions/` that is not a current version | deletes the patched binary and any snapshot stored beside it | patched builds and snapshots live in `~/.local/share/claude-ansi/`, which the pruner never walks |
+| rewrites `~/.local/bin/claude` on every release | a wrapper installed there is replaced by a symlink to the unpatched binary | `--replace-claude` installs the wrapper at `~/.local/bin-ansi/claude` and you put that directory ahead of `~/.local/bin` on `PATH` |
 
 ## Known limits
 
