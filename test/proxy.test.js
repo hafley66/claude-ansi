@@ -105,6 +105,37 @@ test('proxy reinserts ESC for JSON and SSE, forwards to the configured upstream'
   await new Promise((r) => mock.close(r));
 });
 
+test('upstream error mid-stream does not kill the proxy', async () => {
+  const mockPort = await freePort();
+  const mock = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: {"type":"content_block_delta","index":0,"delta":{"text":"partial"}}\n\n');
+    // Die mid-stream: socket destroyed after headers and a partial body.
+    setTimeout(() => res.socket.destroy(), 10);
+  });
+  await new Promise((r) => mock.listen(mockPort, '127.0.0.1', r));
+  const port = await freePort();
+  const proxy = await launchProxy({ ANSI_PROXY_UPSTREAM: 'http://127.0.0.1:' + mockPort }, port);
+  // The suite's post() settles only on end/error; an aborted response emits
+  // neither, so this local request treats aborted as the expected outcome.
+  const cut = new Promise((resolve) => {
+    const req = http.request({ hostname: '127.0.0.1', port, path: '/v1/messages/stream', method: 'POST' }, (res) => {
+      res.on('data', () => {});
+      res.on('aborted', () => resolve('aborted'));
+      res.on('end', () => resolve('ended'));
+    });
+    req.on('error', (e) => resolve(e.code));
+    req.end();
+  });
+  assert.notEqual(await cut, 'ended', 'the cut response must not end cleanly');
+  // The proxy must still answer after the cut: the health probe is the proof
+  // the process survived an error that arrives after headers were sent.
+  const probe = await post(port, '/__claude_ansi_health');
+  assert.ok(probe.body.includes('claude-ansi-proxy'), 'proxy alive after mid-stream upstream death');
+  proxy.kill();
+  await new Promise((r) => mock.close(r));
+});
+
 test('upstream parse table via startup banner', async () => {
   const cases = [
     { in: 'api.anthropic.com', want: 'https://api.anthropic.com:443' },

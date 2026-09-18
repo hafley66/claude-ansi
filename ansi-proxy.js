@@ -144,7 +144,12 @@ const server = http.createServer((req, res) => {
       ur.on('error', () => res.destroy());
     }
   );
-  up.on('error', (e) => { res.writeHead(502); res.end(String(e)); });
+  // Headers already sent means writeHead would throw uncaught and kill the
+  // proxy; cut the response instead.
+  up.on('error', (e) => {
+    if (res.headersSent) { res.destroy(); return; }
+    res.writeHead(502); res.end(String(e));
+  });
   req.pipe(up);
 });
 
