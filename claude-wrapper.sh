@@ -94,14 +94,29 @@ alive() {
   return $rc
 }
 
+# The proxy pins its upstream at process start, so a proxy already running for
+# one upstream cannot serve another: the chained traffic, credentials included,
+# would ride the original upstream. Each upstream therefore gets its own port
+# file and its own proxy; the caller passes which file to write and which
+# upstream to pin. An empty upstream is the default (api.anthropic.com) path.
 start_proxy() {
+  local port_file="$1" upstream="$2"
   command -v node >/dev/null 2>&1 || return 1
   mkdir -p "$CACHE"
-  rm -f "$PORT_FILE"
-  ANSI_PROXY_PORT="${ANSI_PROXY_PORT:-8791}" nohup node "$PROXY_JS" >"$CACHE/proxy.log" 2>&1 &
+  rm -f "$port_file"
+  local envprefix=()
+  if [ -n "$upstream" ]; then
+    envprefix=(ANSI_PROXY_UPSTREAM="$upstream")
+  fi
+  # ${envprefix[@]+"${envprefix[@]}"} is the guarded form, not the bare array
+  # expansion: under bash 3.2 (the system /bin/bash on macOS) with set -u a
+  # zero-element array expands to an unbound-variable error and aborts the
+  # wrapper before exec. The guard drops the empty expansion (upstream unset).
+  ANSI_PROXY_PORT="${ANSI_PROXY_PORT:-8791}" ${envprefix[@]+"${envprefix[@]}"} \
+    nohup node "$PROXY_JS" >"$CACHE/proxy.log" 2>&1 &
   local i port
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    port="$(cat "$PORT_FILE" 2>/dev/null)"
+    port="$(cat "$port_file" 2>/dev/null)"
     if alive "$port"; then
       echo "$port"
       return 0
@@ -135,13 +150,42 @@ if [ ! -x "$REAL" ]; then
   exit 127
 fi
 
-if [ -z "${ANTHROPIC_BASE_URL:-}" ] && [ -z "${CLAUDE_ANSI_NO_PROXY:-}" ]; then
-  PORT="$(cat "$PORT_FILE" 2>/dev/null)"
-  if ! alive "$PORT"; then
-    PORT="$(start_proxy)" || PORT=""
+if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
+  if [ -z "${CLAUDE_ANSI_NO_PROXY:-}" ]; then
+    PORT="$(cat "$PORT_FILE" 2>/dev/null)"
+    if ! alive "$PORT"; then
+      PORT="$(start_proxy "$PORT_FILE" "")" || PORT=""
+    fi
+    if alive "$PORT"; then
+      export ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT"
+      export _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1
+    fi
   fi
-  if alive "$PORT"; then
-    export ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT"
+else
+  # An existing upstream (ccz, a gateway) is chained through a proxy so the
+  # ESC byte the API strips gets put back. The proxy pins its upstream at
+  # start, so each chain gets its own proxy keyed by a hash of the upstream;
+  # reusing someone else's alive proxy would forward this chain's traffic (and
+  # credentials) to that proxy's upstream. A URL already pointing at a local
+  # proxy is left alone, or the proxy would wrap itself. The alive/health-token
+  # check stays the only trust for a found port.
+  if [ -z "${CLAUDE_ANSI_NO_PROXY:-}" ]; then
+    case "$ANTHROPIC_BASE_URL" in
+      http://127.0.0.1:*|http://localhost:*) : ;;
+      *)
+        UPSTREAM_HASH="$(printf '%s' "$ANTHROPIC_BASE_URL" | cksum | cut -d' ' -f1)"
+        CHAIN_PORT_FILE="$CACHE/port-$UPSTREAM_HASH"
+        PORT="$(cat "$CHAIN_PORT_FILE" 2>/dev/null)"
+        if ! alive "$PORT"; then
+          PORT="$(start_proxy "$CHAIN_PORT_FILE" "$ANTHROPIC_BASE_URL")" || PORT=""
+        fi
+        if alive "$PORT"; then
+          export ANSI_PROXY_UPSTREAM="$ANTHROPIC_BASE_URL"
+          export ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT"
+          export _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1
+        fi
+        ;;
+    esac
   fi
 fi
 
