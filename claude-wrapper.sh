@@ -135,13 +135,38 @@ if [ ! -x "$REAL" ]; then
   exit 127
 fi
 
-if [ -z "${ANTHROPIC_BASE_URL:-}" ] && [ -z "${CLAUDE_ANSI_NO_PROXY:-}" ]; then
-  PORT="$(cat "$PORT_FILE" 2>/dev/null)"
-  if ! alive "$PORT"; then
-    PORT="$(start_proxy)" || PORT=""
+if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
+  if [ -z "${CLAUDE_ANSI_NO_PROXY:-}" ]; then
+    PORT="$(cat "$PORT_FILE" 2>/dev/null)"
+    if ! alive "$PORT"; then
+      PORT="$(start_proxy)" || PORT=""
+    fi
+    if alive "$PORT"; then
+      export ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT"
+      export _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1
+    fi
   fi
-  if alive "$PORT"; then
-    export ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT"
+else
+  # An existing upstream (ccz, a gateway) is chained through the proxy rather
+  # than ignored, so the ESC byte the API strips gets put back. A URL that
+  # already points at this proxy's own port is left alone, or the proxy would
+  # wrap itself. The alive/health-token check stays the only trust for the
+  # port, so a stale port file cannot repoint a stranger's address.
+  if [ -z "${CLAUDE_ANSI_NO_PROXY:-}" ]; then
+    PORT="$(cat "$PORT_FILE" 2>/dev/null)"
+    case "$ANTHROPIC_BASE_URL" in
+      "http://127.0.0.1:$PORT"|"http://127.0.0.1:$PORT/"*) : ;;
+      *)
+        if ! alive "$PORT"; then
+          PORT="$(start_proxy)" || PORT=""
+        fi
+        if alive "$PORT"; then
+          export ANSI_PROXY_UPSTREAM="$ANTHROPIC_BASE_URL"
+          export ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT"
+          export _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1
+        fi
+        ;;
+    esac
   fi
 fi
 

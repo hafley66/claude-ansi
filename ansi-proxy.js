@@ -1,7 +1,29 @@
 const http = require('http');
 const https = require('https');
 
-const UPSTREAM = process.env.ANSI_PROXY_UPSTREAM || 'api.anthropic.com';
+// The upstream may be a full URL (ccz sets ANTHROPIC_BASE_URL=https://z.example)
+// or a bare host[:port]. Bare hosts default to https. Scheme decides which
+// transport module talks to it and which port is the scheme default.
+function parseUpstream(raw) {
+  let scheme = 'https';
+  let rest = raw;
+  const m = /^(https?):\/\/(.*)$/.exec(raw);
+  if (m) { scheme = m[1]; rest = m[2]; }
+  const defaultPort = scheme === 'http' ? 80 : 443;
+  let hostname = rest;
+  let port = defaultPort;
+  const colon = rest.lastIndexOf(':');
+  if (colon !== -1) {
+    const maybePort = Number(rest.slice(colon + 1));
+    if (Number.isInteger(maybePort) && maybePort > 0 && maybePort < 65536) {
+      hostname = rest.slice(0, colon);
+      port = maybePort;
+    }
+  }
+  return { mod: scheme === 'http' ? http : https, scheme, hostname, port, defaultPort };
+}
+
+const UPSTREAM = parseUpstream(process.env.ANSI_PROXY_UPSTREAM || 'https://api.anthropic.com:443');
 const PORT = Number(process.env.ANSI_PROXY_PORT || 8787);
 const ESC = String.fromCharCode(27);
 const CSI = /\[((?:\d{1,3};){0,5}\d{1,3})m/g;
@@ -67,10 +89,13 @@ const server = http.createServer((req, res) => {
     res.end(HEALTH_TOKEN + '\n');
     return;
   }
-  const headers = { ...req.headers, host: UPSTREAM };
+  // A scheme-default port keeps the plain hostname in the Host header; an
+  // explicit non-default port must be echoed so the upstream routes it right.
+  const upHost = UPSTREAM.port === UPSTREAM.defaultPort ? UPSTREAM.hostname : UPSTREAM.hostname + ':' + UPSTREAM.port;
+  const headers = { ...req.headers, host: upHost };
   delete headers['accept-encoding'];
-  const up = https.request(
-    { hostname: UPSTREAM, port: 443, path: req.url, method: req.method, headers },
+  const up = UPSTREAM.mod.request(
+    { hostname: UPSTREAM.hostname, port: UPSTREAM.port, path: req.url, method: req.method, headers },
     (ur) => {
       const ct = ur.headers['content-type'] || '';
       const oh = { ...ur.headers };
@@ -146,5 +171,5 @@ server.listen(PORT, '127.0.0.1', () => {
   const port = server.address().port;
   fs.mkdirSync(CACHE, { recursive: true });
   fs.writeFileSync(path.join(CACHE, 'port'), String(port));
-  console.log('ansi-proxy 127.0.0.1:' + port + ' -> ' + UPSTREAM);
+  console.log('ansi-proxy 127.0.0.1:' + port + ' -> ' + UPSTREAM.scheme + '://' + UPSTREAM.hostname + ':' + UPSTREAM.port);
 });
