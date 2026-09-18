@@ -123,25 +123,23 @@ test('upstream parse table via startup banner', async () => {
   }
 });
 
-test('wrapper gate: chained upstream, unset, and set-to-local no-wrap', () => {
+test('wrapper gate: per-upstream port files, reuse within, never across', () => {
   const wrap = fs.readFileSync(path.join(__dirname, '..', 'claude-wrapper.sh'), 'utf8');
-  const gate = (env) => {
-    // Evaluate only the proxy branch in isolation: stub the helpers and the
-    // exec target, then run the gate and capture which exports happened.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ansi-gate-'));
+  const cache = path.join(home, '.cache', 'claude-ansi');
+  // Evaluate only the proxy branch in isolation: stub the helpers and the
+  // exec target, run the gate, capture which exports happened, and which port
+  // file each start_proxy call was handed (recorded to TEST_LOG).
+  const gate = (env, tag) => {
+    const log = path.join(home, 'starts-' + tag + '.log');
     const stubbed = wrap
       .replace(/^newest\(\).*?^}/ms, 'newest() { echo ""; }')
       .replace(/^newest_patched\(\).*?^}/ms, 'newest_patched() { echo ""; }')
       .replace(/^repatch\(\).*?^}/ms, 'repatch() { return 1; }')
-      .replace(/^alive\(\) \{[\s\S]*?\n\}/m, 'alive() { [ -n "${1:-}" ] && echo "1"; }')
-      .replace(/^start_proxy\(\) \{[\s\S]*?\n\}/ms, 'start_proxy() { echo 9999; }')
-      .replace('exec "$REAL" "$@"', 'printf "%s\\n" "FINAL_ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}" "FINAL_ANSI_PROXY_UPSTREAM=${ANSI_PROXY_UPSTREAM:-}" "FINAL_ASSUME=${_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL:-}"')
+      .replace(/^alive\(\) \{[\s\S]*?\n\}/m, 'alive() { [ -n "${1:-}" ]; }')
+      .replace(/^start_proxy\(\) \{[\s\S]*?\n\}/ms, 'start_proxy() { local pf="$1"; printf "%s\\n" "$pf" >> "${TEST_LOG:-/dev/null}"; echo 9999; }')
+      .replace('exec "$REAL" "$@"', 'printf "%s\\n" "FINAL_ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}" "FINAL_ANSI_PROXY_UPSTREAM=${ANSI_PROXY_UPSTREAM:-}"')
       .replace(/if \[ ! -x "\$REAL" \]; then\n  echo "claude-ansi: no runnable claude binary under \$SHARE" >&2\n  exit 127\nfi/, 'REAL=/bin/true');
-    const script = stubbed
-      .replace('SHARE="$HOME/.local/share/claude/versions"', 'SHARE="$HOME/.nonexistent/versions"')
-      .replace('ANSI_DIR="$HOME/.local/share/claude-ansi"', 'ANSI_DIR="$HOME/.nonexistent/claude-ansi"')
-      .replace('PORT_FILE="$CACHE/port"', 'PORT_FILE="$(pwd)/fakepoint"')
-      .replace('CACHE="$HOME/.cache/claude-ansi"', 'CACHE="$(pwd)/fakecache"');
-    fs.writeFileSync('fakepoint', '9999');
     // The gate's meaning depends on these being absent: a shell that exports
     // ANTHROPIC_BASE_URL for ccz (this machine's default) would turn every
     // "unset" case into a chained one and fail the test on correct behavior.
@@ -149,26 +147,59 @@ test('wrapper gate: chained upstream, unset, and set-to-local no-wrap', () => {
     delete base.ANTHROPIC_BASE_URL;
     delete base.ANSI_PROXY_UPSTREAM;
     delete base._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL;
-    const out = execFileSync('bash', ['-c', script], { env: { ...base, ...env }, encoding: 'utf8' });
+    // Run under system /bin/bash (3.2), not the $PATH resolution which boop
+    // may point at Homebrew bash 5: 3.2 is the regime the wrapper has to work in.
+    const out = execFileSync('/bin/bash', ['-c', stubbed], { env: { ...base, HOME: home, TEST_LOG: log, ...env }, encoding: 'utf8' });
     const res = {};
     for (const line of out.split('\n')) {
       const m = /^FINAL_(\w+)=(.*)$/.exec(line);
       if (m) res[m[1]] = m[2];
     }
-    return res;
+    const starts = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
+    return { res, starts };
   };
 
-  const chained = gate({ ANTHROPIC_BASE_URL: 'https://z.example' });
-  assert.equal(chained.ANTHROPIC_BASE_URL, 'http://127.0.0.1:9999');
-  assert.equal(chained.ANSI_PROXY_UPSTREAM, 'https://z.example');
-  assert.equal(chained.ASSUME, '1');
+  const A = 'https://upstream-x.example';
+  const B = 'https://upstream-y.example';
 
-  const unset = gate({});
-  assert.equal(unset.ANSI_PROXY_UPSTREAM, '');
-  assert.equal(unset.ANTHROPIC_BASE_URL, 'http://127.0.0.1:9999');
-  assert.equal(unset.ASSUME, '1');
+  // Different upstreams resolve to different port files, and both start.
+  const a1 = gate({ ANTHROPIC_BASE_URL: A }, 'a1');
+  const b1 = gate({ ANTHROPIC_BASE_URL: B }, 'b1');
+  assert.equal(a1.starts.length, 1);
+  assert.equal(b1.starts.length, 1);
+  assert.notEqual(a1.starts[0], b1.starts[0], 'different upstream, different port file');
+  assert.ok(path.basename(a1.starts[0]).startsWith('port-'), 'chained port file is hash-keyed');
+  assert.equal(a1.res.ANTHROPIC_BASE_URL, 'http://127.0.0.1:9999');
+  assert.equal(a1.res.ANSI_PROXY_UPSTREAM, A);
+  assert.equal(b1.res.ANSI_PROXY_UPSTREAM, B);
 
-  const local = gate({ ANTHROPIC_BASE_URL: 'http://127.0.0.1:9999' });
-  assert.equal(local.ANSI_PROXY_UPSTREAM, '', 'no double wrap');
-  assert.equal(local.ANTHROPIC_BASE_URL, 'http://127.0.0.1:9999');
+  // Same upstream re-resolves to the same port file.
+  const a2 = gate({ ANTHROPIC_BASE_URL: A }, 'a2');
+  assert.equal(a2.starts[0], a1.starts[0], 'same upstream, same port file');
+
+  // An alive port file for its own upstream is reused, not restarted.
+  fs.mkdirSync(path.dirname(b1.starts[0]), { recursive: true });
+  fs.writeFileSync(b1.starts[0], '9999');
+  const b2 = gate({ ANTHROPIC_BASE_URL: B }, 'b2');
+  assert.equal(b2.starts.length, 0, 'alive upstream file is reused');
+  assert.equal(b2.res.ANSI_PROXY_UPSTREAM, B);
+
+  // A differing upstream's live port file is never picked up by another chain.
+  const a3 = gate({ ANTHROPIC_BASE_URL: A }, 'a3');
+  assert.equal(a3.starts.length, 1, 'X still starts its own proxy');
+  assert.equal(a3.starts[0], a1.starts[0]);
+  assert.notEqual(a3.starts[0], b1.starts[0]);
+
+  // Unset still uses the plain (non-hashed) port file.
+  const unset = gate({}, 'unset');
+  assert.equal(unset.res.ANSI_PROXY_UPSTREAM, '');
+  assert.equal(unset.starts.length, 1);
+  assert.equal(unset.starts[0], path.join(cache, 'port'), 'unset uses the plain port file');
+
+  // Already-local URL keeps the no-wrap no-op, nothing starts.
+  const local = gate({ ANTHROPIC_BASE_URL: 'http://127.0.0.1:9999' }, 'local');
+  assert.equal(local.starts.length, 0);
+  assert.equal(local.res.ANSI_PROXY_UPSTREAM, '');
+
+  fs.rmSync(home, { recursive: true, force: true });
 });
